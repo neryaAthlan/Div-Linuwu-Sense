@@ -20,11 +20,10 @@ For Debian / Ubuntu:
 ```bash
 sudo apt install linux-headers-$(uname -r)
 ```
-Next, clone the repository and build the module (the ANV16S-71 support lives on the `nitro-anv16s-71` branch):
+Next, clone the repository and build the module:
 ```bash
 git clone https://github.com/neryaAthlan/Div-Linuwu-Sense.git
 cd Div-Linuwu-Sense
-git checkout nitro-anv16s-71
 make install
 ```
 The make command will remove the current acer_wmi module and load the patched version.
