@@ -20,20 +20,58 @@ For Debian / Ubuntu:
 ```bash
 sudo apt install linux-headers-$(uname -r)
 ```
-Next, clone the repository and build the module:
+Next, clone the repository and install the module:
 ```bash
 git clone https://github.com/neryaAthlan/Div-Linuwu-Sense.git
 cd Div-Linuwu-Sense
-make install
+sudo ./linuwu-sense.sh install
 ```
-The make command will remove the current acer_wmi module and load the patched version.
+The script builds the module, removes the current `acer_wmi` module, loads the patched one, and sets up loading at boot, the shutdown unit and the `linuwu_sense` group permissions. When DKMS is installed, it also registers the module with DKMS so **it is rebuilt automatically after every kernel upgrade**.
 
 To Uninstall:
 ```bash
+sudo ./linuwu-sense.sh uninstall
+```
+
+The `Makefile` still works and does the same steps by hand, but installs for the running kernel only (no DKMS rebuilds):
+```bash
+make install
 make uninstall
 ```
 > **⚠️ Warning!**
 > ## Use at your own risk! This driver is independently developed through reverse engineering the official PredatorSense app, without any involvement from Acer. It interacts with low-level WMI methods, which may not be tested across all models.
+
+## 🧰 Module Management
+`linuwu-sense.sh` manages the module and exposes its settings without typing the long sysfs paths. `status`, `get` and `set` work without root for group-writable settings; the other commands ask for sudo.
+
+| Command | Description |
+| --- | --- |
+| `install` | Build and install for the running kernel, then load it |
+| `uninstall` | Unload, remove the module and all configuration it added |
+| `reinstall` | `uninstall` followed by `install` |
+| `reload` | Reload the module and re-apply permissions |
+| `build` / `clean` | Build only / remove build artifacts |
+| `status` | Kernel, headers, install, DKMS, service, group and current settings |
+| `get <setting>` | Print a setting |
+| `set <setting> <value>` | Change a setting |
+
+```bash
+sudo ./linuwu-sense.sh install
+./linuwu-sense.sh status
+sudo ./linuwu-sense.sh set platform-profile performance
+./linuwu-sense.sh get fan-speed
+```
+
+Settings available through `get`/`set`: `platform-profile`, `fan-speed`, `battery-limiter`, `battery-calibration`, `usb-charging`, `backlight-timeout`, `boot-animation-sound`, `lcd-override`, `four-zone-mode`, `per-zone-mode`. Values are validated before they are written. Settings that are root-only on your model (for example `backlight_timeout` on the ANV16S-71) still work, but ask for sudo.
+
+### Rebuilding after kernel upgrades (DKMS)
+When the `dkms` package is installed, `install` registers the source as `linuwu_sense/1.0.0` with DKMS and installs the module into `/lib/modules/<kernel>/updates/dkms/`. Debian and Arch run DKMS from their kernel post-install hooks, so a new kernel gets the module rebuilt and installed automatically; no reinstall is needed after an upgrade.
+
+```bash
+dkms status -m linuwu_sense   # e.g. linuwu_sense/1.0.0, 6.12.116+deb13-amd64, x86_64: installed
+```
+
+Re-running `sudo ./linuwu-sense.sh install` refreshes the source DKMS builds from, which is what you need after pulling new driver changes. Without DKMS, the script falls back to copying the `.ko` for the running kernel only and prints a warning.
 
 ## 💻 Supported Models
 Model support is selected by a DMI match in `acer_quirks[]` inside `src/linuwu_sense.c`. Laptops without a matching entry fall back to the generic Nitro/Predator quirks.
@@ -62,7 +100,7 @@ ls /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/
 ```
 The directory listing should contain `nitro_sense` and `four_zoned_kb`, and the log should show `Detected model type: Nitro ANV16S-71` followed by the five detected profiles.
 
-On this model, `make install` grants group write access (via `/etc/tmpfiles.d/linuwu_sense.conf`) to `fan_speed`, `battery_limiter`, `battery_calibration` and `usb_charging`; `backlight_timeout`, `boot_animation_sound` and `lcd_override` are writable by root only, so use `sudo` for those.
+On this model, the install (script or `make install`) grants group write access (via `/etc/tmpfiles.d/linuwu_sense.conf`) to `fan_speed`, `battery_limiter`, `battery_calibration` and `usb_charging`; `backlight_timeout`, `boot_animation_sound` and `lcd_override` are writable by root only, so use `sudo` for those.
 
 > **Upgrading from an older build?** If you previously forced this laptop to work with `options linuwu_sense enable_all=1` or `options linuwu_sense nitro_v4=1` in `/etc/modprobe.d/`, remove those options. They bypass the DMI table entirely (`find_quirks()` returns before matching the model), so the ANV16S-71 entry is never used and the profiles get force-enabled instead of read from the firmware. The model is now detected on its own:
 > ```bash

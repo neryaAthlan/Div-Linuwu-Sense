@@ -22,6 +22,8 @@ MDIR="/lib/modules/${KVER}/kernel/drivers/platform/x86"
 SYSFS_BASE="/sys/module/${MODNAME}/drivers/platform:acer-wmi/acer-wmi"
 KO_SRC="src/${MODNAME}.ko"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DKMS_CONF="${SCRIPT_DIR}/dkms.conf"
+DKMS_VER="$(sed -n 's/^PACKAGE_VERSION="\(.*\)"$/\1/p' "$DKMS_CONF" 2>/dev/null | head -n1)"
 
 ORIG_ARGS=("$@")
 
@@ -80,7 +82,46 @@ module_loaded() { [ -e "/sys/module/${MODNAME}" ]; }
 
 kos_built() { [ -f "$SCRIPT_DIR/$KO_SRC" ]; }
 
-ko_installed() { [ -f "$MDIR/${MODNAME}.ko" ]; }
+# Path of the module installed for the running kernel: either the manual
+# Makefile location or the DKMS-managed one (which may be compressed).
+ko_path() {
+	local f
+	for f in "$MDIR/${MODNAME}.ko" "/lib/modules/${KVER}/updates/dkms/${MODNAME}.ko"*; do
+		if [ -f "$f" ]; then
+			printf '%s\n' "$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
+ko_installed() { ko_path >/dev/null; }
+
+dkms_available() {
+	command -v dkms >/dev/null 2>&1 && [ -n "$DKMS_VER" ] && [ -f "$DKMS_CONF" ]
+}
+
+# Remove every version/keypair registered for this package, so a changed
+# source tree is copied fresh into DKMS on the next install.
+dkms_remove_all() {
+	dkms_available || return 0
+	local dir ver
+	for dir in /var/lib/dkms/"$MODNAME"/*/; do
+		[ -d "$dir" ] || continue
+		ver="$(basename "$dir")"
+		dkms remove -m "$MODNAME" -v "$ver" --all >/dev/null 2>&1 || true
+	done
+}
+
+install_dkms() {
+	info "Installing ${MODNAME} ${DKMS_VER} through DKMS..."
+	dkms_remove_all
+	# Drop a module installed manually by the Makefile, if any.
+	rm -f "$MDIR/${MODNAME}.ko"
+	dkms add "$SCRIPT_DIR" >/dev/null || die "dkms add failed for ${SCRIPT_DIR}"
+	dkms install --force -m "$MODNAME" -v "$DKMS_VER" || die "dkms install failed (see the output above)"
+	ok "DKMS registered ${MODNAME}/${DKMS_VER}; kernel upgrades rebuild it automatically"
+}
 
 check_kernel() {
 	[ -d "$KDIR" ] ||
@@ -190,16 +231,21 @@ cmd_install() {
 	fi
 
 	build_module
-	ko_installed && warn "Existing ${MDIR}/${MODNAME}.ko will be replaced."
+	ko_installed && warn "Existing ${MODNAME}.ko for ${KVER} will be replaced."
 
 	# The stock driver must not be bound to the same WMI device.
 	modprobe -r acer_wmi 2>/dev/null || true
 	modprobe -r "$MODNAME" 2>/dev/null || true
 
-	info "Installing ${MODNAME}.ko for kernel ${KVER}..."
-	install -d "$MDIR"
-	install -m 644 "$SCRIPT_DIR/$KO_SRC" "$MDIR/${MODNAME}.ko"
-	depmod -a "$KVER"
+	if dkms_available; then
+		install_dkms
+	else
+		warn "dkms not found; installing for kernel ${KVER} only (upgrades will need a reinstall)."
+		info "Installing ${MODNAME}.ko for kernel ${KVER}..."
+		install -d "$MDIR"
+		install -m 644 "$SCRIPT_DIR/$KO_SRC" "$MDIR/${MODNAME}.ko"
+		depmod -a "$KVER"
+	fi
 
 	printf 'blacklist acer_wmi\n' > /etc/modprobe.d/blacklist-acer_wmi.conf
 	printf '%s\n' "$MODNAME" > "/etc/modules-load.d/${MODNAME}.conf"
@@ -266,6 +312,10 @@ cmd_uninstall() {
 		groupdel "$MODNAME" 2>/dev/null || warn "Group ${MODNAME} is still in use; left in place."
 	fi
 
+	if dkms_available; then
+		dkms_remove_all
+		ok "Removed DKMS registration"
+	fi
 	rm -f "/etc/tmpfiles.d/${MODNAME}.conf"
 	rm -f "$MDIR/${MODNAME}.ko"
 	depmod -a "$KVER"
@@ -299,8 +349,9 @@ cmd_status() {
 	else
 		printf '  %-18s %s\n' "Built:" "no (run install or build)"
 	fi
-	if ko_installed; then
-		printf '  %-18s %s\n' "Installed:" "yes ($MDIR/${MODNAME}.ko)"
+	local installed_path
+	if installed_path="$(ko_path)"; then
+		printf '  %-18s %s\n' "Installed:" "yes ($installed_path)"
 	else
 		printf '  %-18s %s\n' "Installed:" "no"
 	fi
@@ -308,6 +359,16 @@ cmd_status() {
 		printf '  %-18s %s\n' "Loaded:" "${GREEN}yes${RESET}"
 	else
 		printf '  %-18s %s\n' "Loaded:" "${RED}no${RESET}"
+	fi
+
+	if dkms_available; then
+		local dkms_kernels
+		dkms_kernels="$(dkms status -m "$MODNAME" 2>/dev/null | cut -d, -f2 | sed 's/^ *//; s/ *$//' | paste -sd',' - | sed 's/,/, /g')"
+		if [ -n "$dkms_kernels" ]; then
+			printf '  %-18s %s\n' "DKMS:" "${DKMS_VER} (${dkms_kernels})"
+		else
+			printf '  %-18s %s\n' "DKMS:" "not registered"
+		fi
 	fi
 
 	printf '  %-18s %s\n' "Machine:" "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo unknown) $(cat /sys/class/dmi/id/product_name 2>/dev/null || true)"
@@ -383,7 +444,7 @@ ${BOLD}Usage${RESET}
   $0 <command> [arguments]
 
 ${BOLD}Commands${RESET}
-  install                 Build and install for the running kernel, and load it
+  install                 Build and install (via DKMS when available), then load it
   uninstall               Unload, remove the module and all configuration it added
   reinstall               uninstall followed by install
   reload                  Reload the module and re-apply permissions
